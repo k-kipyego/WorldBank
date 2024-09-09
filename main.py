@@ -1,91 +1,116 @@
 import requests
 import psycopg2
-import psycopg2.extras
+import re
 
-# Function to fetch data from the API
-def fetch_data(api_url):
-    response = requests.get(api_url)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Failed to fetch data from API. Status code: {response.status_code}")
-        return []
+# Database connection parameters
+db_name = 'RFPs'
+db_user = 'postgres'
+db_password = '0987'
+db_host = 'localhost'
+db_port = '5432'
+table_documents = 'world_bank'
 
-# Function to create a table with dynamic columns
-def create_table(conn, table_name, columns):
-    cursor = conn.cursor()
-    
-    # Construct the CREATE TABLE query dynamically
-    create_table_query = f"CREATE TABLE IF NOT EXISTS {table_name} ("
-    create_table_query += ", ".join([f"{column} TEXT" for column in columns])
-    create_table_query += ");"
-    
+# Connect to PostgreSQL database
+conn = psycopg2.connect(
+    dbname=db_name,
+    user=db_user,
+    password=db_password,
+    host=db_host,
+    port=db_port
+)
+cursor = conn.cursor()
+
+# Base URL for the WDS API
+base_url = "https://search.worldbank.org/api/v2/wds"
+
+# Parameters for the API request
+params = {
+    "format": "json",
+    "rows": 10000,  # Maximum number of rows per request
+    "os": 0,       # Offset, starting at 0
+    "fl": "id,docdt,docty,display_title,pdfurl,listing_relative_url",  # Fields to retrieve
+    "strdate": "2024-01-01"  # Start date for filtering
+}
+
+# Total number of records to retrieve
+total_records = 10055  # Adjust as needed based on actual total records
+
+# Function to extract the code from display_title
+def extract_code(display_title):
+    match = re.search(r"P\d+", display_title)
+    return match.group(0) if match else None
+
+# Function to insert data into PostgreSQL
+def insert_data(doc):
     try:
-        cursor.execute(create_table_query)
-        conn.commit()
-        print(f"Table '{table_name}' created successfully or already exists.")
-    except Exception as e:
-        print(f"Error creating table: {e}")
-        conn.rollback()
+        # Ensure 'id' and 'display_title' are not None
+        if not doc.get('id') or not doc.get('display_title'):
+            print(f"Skipping document due to missing 'id' or 'display_title': {doc}")
+            return
 
-# Function to save data to PostgreSQL dynamically
-def save_to_db(data, conn, table_name):
-    if not data:
-        print("No data to save.")
-        return
-    
-    # Use the first record to determine the columns
-    columns = data[0].keys()
-    
-    # Create the table dynamically
-    create_table(conn, table_name, columns)
-    
-    # Construct the INSERT query dynamically
-    cursor = conn.cursor()
-    insert_query = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES %s"
-    
-    # Convert records to tuples
-    values = [[record.get(col, None) for col in columns] for record in data]
-    
-    try:
-        psycopg2.extras.execute_values(cursor, insert_query, values)
+        # Extract the code from display_title
+        code = extract_code(doc.get('display_title', ''))
+
+        # Insert data into the Documents table
+        cursor.execute(
+            f"""
+            INSERT INTO {table_documents} (id, docty, docdt, display_title, pdfurl, listing_relative_url, code)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING;
+            """,
+            (
+                doc.get('id'),
+                doc.get('docty'),
+                doc.get('docdt'),
+                doc.get('display_title'),
+                doc.get('pdfurl'),
+                doc.get('listing_relative_url'),
+                code  # Insert the extracted code
+            )
+        )
+
+        # Commit the transaction
         conn.commit()
-        print("Data inserted successfully!")
+        print(f"Data for document {doc.get('id')} inserted successfully.")
+
     except Exception as e:
         print(f"Error inserting data: {e}")
         conn.rollback()
 
-# Main function to process the API endpoint
-def process_api_endpoint(api_url, db_credentials, table_name="procurement_opportunities"):
-    # Fetch data from the API
-    api_data = fetch_data(api_url)
-    if not api_data:
-        print("No data fetched from API.")
-        return
-    
-    # Connect to PostgreSQL database
-    try:
-        conn = psycopg2.connect(**db_credentials)
-        print("Connected to the database successfully!")
-    except Exception as e:
-        print(f"Error connecting to the database: {e}")
-        return
-    
-    # Save the data to the database dynamically
-    save_to_db(api_data, conn, table_name)
-    
-    # Close the connection
-    conn.close()
+# Fetch all data first
+all_documents = []
 
-# Replace with your actual database credentials
-db_credentials = {
-    "dbname": "RFPs",
-    "user": "postgres",
-    "password": "0987",
-    "host": "localhost",
-    "port": "5432"
-}
+while params["os"] < total_records:
+    # Make the API request
+    response = requests.get(base_url, params=params)
 
-# Example usage
-api_endpoint = "https://mydata.iadb.org/resource/tyc4-8qda.json"
-process_api_endpoint(api_endpoint, db_credentials)
+    # Check if the request was successful
+    if response.status_code == 200:
+        data = response.json()
+        documents = data.get('documents', {})
+
+        # Collect all documents in a list and filter out those without 'id'
+        for doc_id, doc_info in documents.items():
+            if doc_info.get('id'):
+                all_documents.append(doc_info)
+            else:
+                print(f"Document missing 'id': {doc_info}")
+
+        # Update the offset for the next request
+        params["os"] += params["rows"]
+    else:
+        print(f"Request failed with status code {response.status_code}")
+        break
+
+# Sort documents by 'docdt' in descending order, using a default value for None
+all_documents.sort(key=lambda x: x.get('docdt') or '', reverse=True)
+
+# Insert sorted documents into the database
+for doc in all_documents:
+    insert_data(doc)
+
+# Close the database connection
+cursor.close()
+conn.close()
+
+print(f"All documents have been retrieved, sorted, and inserted into the '{table_documents}' table.")
