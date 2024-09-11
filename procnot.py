@@ -26,8 +26,8 @@ base_url = "https://search.worldbank.org/api/v2/procnotices"
 # Parameters for the API request
 params = {
     "format": "json",
-    "rows": 100000,  # Fetching up to 1000 records per request
-    "os": 0,    # Starting offset
+    "rows": 1000,  # Fetching up to 1000 records per request
+    "os": 0,  # Starting offset
     "strdate": "2024-01-01",  # Start date filter
 }
 
@@ -76,28 +76,39 @@ def insert_data(doc):
     except Exception as e:
         print(f"Error inserting data: {e}")
 
-# Make the API request
-response = requests.get(base_url, params=params)
+# Total number of records to retrieve
+total_records = 10055
 
-# Check if the request was successful
-if response.status_code == 200:
-    data = response.json()
+# Loop through all pages to retrieve the data
+while params["os"] < total_records:
+    # Make the API request
+    response = requests.get(base_url, params=params)
 
-    # Print out the raw response for debugging
-    print("Full API response:")
-    print(json.dumps(data, indent=4))
+    # Check if the request was successful
+    if response.status_code == 200:
+        data = response.json()
 
-    procnotices = data.get('procnotices', [])
+        # Get the total number of records from the first response
+        if params["os"] == 0:
+            total_records = int(data.get("total", 0))
+            print(f"Total records to fetch: {total_records}")
 
-    # Check if any procurement notices exist
-    if procnotices:
-        for doc in procnotices:
-            # Insert each document into the database
-            insert_data(doc)
+        procnotices = data.get('procnotices', [])
+
+        # Check if any procurement notices exist
+        if procnotices:
+            for doc in procnotices:
+                # Insert each document into the database
+                insert_data(doc)
+        else:
+            print("No procurement notices found in the 'procnotices' key.")
+        
+        # Increment the offset for the next request
+        params["os"] += params["rows"]
+        print(f"Fetching records starting at offset: {params['os']}")
     else:
-        print("No procurement notices found in the 'procnotices' key.")
-else:
-    print(f"Request failed with status code {response.status_code}")
+        print(f"Request failed with status code {response.status_code}")
+        break
 
 # Close the database connection
 cursor.close()

@@ -26,7 +26,7 @@ base_url = "https://search.worldbank.org/api/v2/wds"
 # Parameters for the API request
 params = {
     "format": "json",
-    "rows": 10000,  # Maximum number of rows per request
+    "rows": 1000,  # Maximum number of rows per request
     "os": 0,       # Offset, starting at 0
     "fl": "id,docdt,docty,display_title,pdfurl,listing_relative_url",  # Fields to retrieve
     "strdate": "2024-01-01"  # Start date for filtering
@@ -77,9 +77,7 @@ def insert_data(doc):
         print(f"Error inserting data: {e}")
         conn.rollback()
 
-# Fetch all data first
-all_documents = []
-
+# Fetch and insert documents with pagination
 while params["os"] < total_records:
     # Make the API request
     response = requests.get(base_url, params=params)
@@ -87,30 +85,30 @@ while params["os"] < total_records:
     # Check if the request was successful
     if response.status_code == 200:
         data = response.json()
+        
+        # Get the total number of records from the first response
+        if params["os"] == 0:
+            total_records = int(data.get("total", 0))
+            print(f"Total records to fetch: {total_records}")
+
         documents = data.get('documents', {})
 
-        # Collect all documents in a list and filter out those without 'id'
+        # Insert each document into the database
         for doc_id, doc_info in documents.items():
             if doc_info.get('id'):
-                all_documents.append(doc_info)
+                insert_data(doc_info)
             else:
                 print(f"Document missing 'id': {doc_info}")
 
         # Update the offset for the next request
         params["os"] += params["rows"]
+        print(f"Fetching records starting at offset: {params['os']}")
     else:
         print(f"Request failed with status code {response.status_code}")
         break
-
-# Sort documents by 'docdt' in descending order, using a default value for None
-all_documents.sort(key=lambda x: x.get('docdt') or '', reverse=True)
-
-# Insert sorted documents into the database
-for doc in all_documents:
-    insert_data(doc)
 
 # Close the database connection
 cursor.close()
 conn.close()
 
-print(f"All documents have been retrieved, sorted, and inserted into the '{table_documents}' table.")
+print(f"All documents have been retrieved and inserted into the '{table_documents}' table.")
